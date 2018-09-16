@@ -33,10 +33,7 @@ from loopy.kernel.data import (
         MultiAssignmentBase, TemporaryVariable, AddressSpace)
 from loopy.diagnostic import warn_with_kernel, LoopyError
 from loopy.symbolic import CoefficientCollector
-from pytools import ImmutableRecord, memoize_method
-from loopy.kernel.function_interface import CallableKernel
-from loopy.translation_unit import TranslationUnit
-from functools import partial
+from pytools import Record, memoize_method
 
 
 __doc__ = """
@@ -1109,18 +1106,16 @@ class ExpressionOpCounter(CounterBase):
 
 # {{{ modified coefficient collector that ignores denominator of floor div
 
-class _IndexStrideCoefficientCollector(CoefficientCollector):
+class IndexStrideCoefficientCollector(CoefficientCollector):
 
     def map_floor_div(self, expr):
         from warnings import warn
-        warn("_IndexStrideCoefficientCollector encountered FloorDiv, ignoring "
+        warn("IndexStrideCoefficientCollector encountered FloorDiv, ignoring "
              "denominator in expression %s" % (expr))
         return self.rec(expr.numerator)
 
 # }}}
 
-
-# {{{ _get_lid_and_gid_strides
 
 def _get_lid_and_gid_strides(knl, array, index):
     # find all local and global index tags and corresponding inames
@@ -1169,9 +1164,8 @@ def _get_lid_and_gid_strides(knl, array, index):
             for idx, axis_tag in zip(index, dim_tags):
                 # collect index coefficients
                 try:
-                    coeffs = _IndexStrideCoefficientCollector(
-                            [tag_to_iname_dict[tag]])(
-                                    simplify_using_aff(knl, idx))
+                    coeffs = IndexStrideCoefficientCollector()(
+                              simplify_using_aff(knl, idx))
                 except ExpressionNotAffineError:
                     total_iname_stride = None
                     break
