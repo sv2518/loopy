@@ -1954,11 +1954,6 @@ def realize_ilp(kernel):
 
 # {{{ realize C vector extension
 def cvec_retag_and_privatize(kernel, vectorext_inst, pragma_inst_to_tag, unr_inst_to_tag):
-
-# for i in iname_to_pragma:
-#         kernel = tag_inames(kernel, [(i, "omp_simd")], retag=True)
-#     for i in iname_to_unr:
-#         kernel = tag_inames(kernel, [(i, "unr")], retag=True)
     from loopy.kernel.data import VectorizeTag, ArrayArg, OpenMPSIMDTag
     from loopy.kernel.array import VectorArrayDimTag
     from loopy.kernel.tools import DomainChanger
