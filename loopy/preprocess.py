@@ -2342,8 +2342,6 @@ def preprocess_kernel(kernel, device=None):
 
     kernel = realize_ilp(kernel)
 
-    kernel = realize_c_vec(kernel)
-
     kernel = find_temporary_address_space(kernel)
 
     # check for atomic loads, much easier to do here now that the dependencies
