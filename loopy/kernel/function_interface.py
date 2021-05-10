@@ -278,37 +278,6 @@ def get_kw_pos_association(kernel):
 
     return kw_to_pos, pos_to_kw
 
-
-class GridOverrideForCalleeKernel(ImmutableRecord):
-    """
-    Helper class to set the
-    :attr:`loopy.kernel.LoopKernel.override_get_grid_size_for_insn_ids` of the
-    callee kernels. Refer to
-    :meth:`loopy.kernel.function_interface.GridOverrideForCalleeKernel.__call__`,
-    :meth:`loopy.kernel.function_interface.CallbleKernel.with_hw_axes_sizes`.
-
-    .. attribute:: global_size
-
-        The global work group size that to be set in the callee kernel.
-
-    .. attribute:: local_size
-
-        The local work group size that has to be set in the callee kernel.
-
-    .. note::
-
-        This class acts as a pseudo-callable and its significance lies in
-        solving picklability issues.
-    """
-    fields = {"local_size", "global_size"}
-
-    def __init__(self, global_size, local_size):
-        self.global_size = global_size
-        self.local_size = local_size
-
-    def __call__(self, insn_ids, callables_table, ignore_auto=True):
-        return self.global_size, self.local_size
-
 # }}}
 
 
@@ -338,11 +307,14 @@ class InKernelCallable(ImmutableRecord):
     .. automethod:: with_types
     .. automethod:: with_descrs
     .. automethod:: with_target
-    .. automethod:: with_hw_axes_sizes
     .. automethod:: generate_preambles
     .. automethod:: emit_call
     .. automethod:: emit_call_insn
     .. automethod:: is_ready_for_codegen
+    .. automethod:: get_called_callables
+    .. automethod:: with_name
+    .. automethod:: get_hw_axes_sizes
+    .. automethod:: get_used_hw_axes
 
     .. note::
 
@@ -449,21 +421,31 @@ class InKernelCallable(ImmutableRecord):
 
         return self.copy(arg_id_to_dtype=new_arg_id_to_dtype)
 
-    def with_hw_axes_sizes(self, global_size, local_size):
-        """
-        Returns a copy of *self* with modifications to comply with the grid
-        sizes ``(local_size, global_size)`` of the program in which it is
-        supposed to be called.
-
-        :arg local_size: An instance of :class:`islpy.PwAff`.
-        :arg global_size: An instance of :class:`islpy.PwAff`.
-        """
-        raise NotImplementedError()
-
     def is_ready_for_codegen(self):
 
         return (self.arg_id_to_dtype is not None and
                 self.arg_id_to_descr is not None)
+
+    def get_hw_axes_sizes(self, arg_id_to_val, space, callables_table):
+        """
+        Returns ``gsizes, lsizes``, where *gsizes* and *lsizes* are mappings
+        from axis indices to corresponding group or local hw axis sizes. The hw
+        axes sizes are represented as instances of :class:`islpy.PwAff` on the
+        given *space*.
+
+        :arg arg_id_to_val: A mapping from the passed argument *id* to the
+            arguments at a call-site.
+        :arg space: An instance of :class:`islpy.Space`.
+        """
+        raise NotImplementedError
+
+    def get_used_hw_axes(self, callables_table):
+        """
+        Returns a tuple ``group_axes_used, local_axes_used``, where
+        ``(group|local)_axes_used`` are :class:`frozenset` of hardware axes
+        indices used by the callable.
+        """
+        raise NotImplementedError
 
     def generate_preambles(self, target):
         """
@@ -500,6 +482,23 @@ class InKernelCallable(ImmutableRecord):
         argument in the callable's namespace.
         """
         raise NotImplementedError()
+
+    def get_called_callables(self, callables_table):
+        """
+        Returns a :class:`frozenset` of callable ids called by *self* that are
+        resolved via *callables_table*.
+
+        :arg callables_table: Similar to
+            :attr:`loopy.TranslationUnit.callables_table`.
+        """
+        raise NotImplementedError
+
+    def with_name(self, name):
+        """
+        Returns a copy of *self* so that it could be referred by *name*
+        in a :attr:`loopy.TranslationUnit.callables_table`'s namespace.
+        """
+        raise NotImplementedError
 
 # }}}
 
@@ -546,8 +545,11 @@ class ScalarCallable(InKernelCallable):
         return (self.copy(arg_id_to_descr=arg_id_to_descr),
                 clbl_inf_ctx)
 
-    def with_hw_axes_sizes(self, global_size, local_size):
-        return self.copy()
+    def get_hw_axes_sizes(self, arg_id_to_val, space, callables_table):
+        return {}, {}
+
+    def get_used_hw_axes(self, callables_table):
+        return frozenset(), frozenset()
 
     def is_ready_for_codegen(self):
 
@@ -655,6 +657,15 @@ class ScalarCallable(InKernelCallable):
     def with_added_arg(self, arg_dtype, arg_descr):
         raise LoopyError("Cannot add args to scalar callables.")
 
+    def get_called_callables(self, callables_table):
+        """
+        Returns a :class:`frozenset` of callable ids called by *self*.
+        """
+        return frozenset()
+
+    def with_name(self, name):
+        return self
+
 # }}}
 
 
@@ -673,16 +684,12 @@ class CallableKernel(InKernelCallable):
     :meth:`CallableKernel.with_descrs` should be called in order to match
     the arguments' shapes/strides across the caller and the callee kernel.
 
-    :meth:`CallableKernel.with_hw_axes_sizes` should be called to set the grid
-    sizes for the :attr:`CallableKernel.subkernel` of the callable.
-
     .. attribute:: subkernel
 
         :class:`~loopy.LoopKernel` which is being called.
 
     .. automethod:: with_descrs
     .. automethod:: with_types
-    .. automethod:: with_hw_axes_sizes
     """
 
     fields = {"subkernel", "arg_id_to_dtype", "arg_id_to_descr"}
@@ -873,11 +880,29 @@ class CallableKernel(InKernelCallable):
         return self.copy(subkernel=self.subkernel,
                 arg_id_to_descr=arg_id_to_descr)
 
-    def with_hw_axes_sizes(self, gsize, lsize):
-        return self.copy(
-                subkernel=self.subkernel.copy(
-                    overridden_get_grid_sizes_for_insn_ids=(
-                        GridOverrideForCalleeKernel(gsize, lsize))))
+    def get_used_hw_axes(self, callables_table):
+        gsize, lsize = self.subkernel.get_grid_size_upper_bounds(callables_table,
+                                                                 return_dict=True)
+
+        return frozenset(gsize.keys()), frozenset(lsize.keys())
+
+    def get_hw_axes_sizes(self, arg_id_to_val, space, callables_table):
+        from loopy.isl_helpers import subst_into_pwaff
+        _, pos_to_kw = get_kw_pos_association(self.subkernel)
+        gsize, lsize = self.subkernel.get_grid_size_upper_bounds(callables_table,
+                                                                 return_dict=True)
+
+        subst_dict = {i: val
+                      for i, val in arg_id_to_val.items()
+                      if isinstance(self.subkernel.arg_dict[pos_to_kw[i]],
+                                    ValueArg)}
+
+        gsize = {iaxis: subst_into_pwaff(space, size, subst_dict)
+                 for iaxis, size in gsize.items()}
+        lsize = {iaxis: subst_into_pwaff(space, size, subst_dict)
+                 for iaxis, size in lsize.items()}
+
+        return gsize, lsize
 
     def is_ready_for_codegen(self):
         return (self.arg_id_to_dtype is not None
@@ -929,6 +954,15 @@ class CallableKernel(InKernelCallable):
                           for par, par_dtype in zip(parameters, par_dtypes)]
 
         return var(self.subkernel.name)(*tgt_parameters), False
+
+    def get_called_callables(self, callables_table):
+        from loopy.kernel.tools import get_resolved_callable_ids_called_by_knl
+        return get_resolved_callable_ids_called_by_knl(self.subkernel,
+                                                       callables_table)
+
+    def with_name(self, name):
+        new_knl = self.subkernel.copy(name=name)
+        return self.copy(subkernel=new_knl)
 
 # }}}
 

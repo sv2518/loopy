@@ -20,7 +20,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 """
 
-import re
 import collections
 
 from pytools import ImmutableRecord
@@ -28,18 +27,15 @@ from pymbolic.primitives import Variable
 from functools import wraps
 
 from loopy.symbolic import (RuleAwareIdentityMapper, ResolvedFunction,
-        CombineMapper, SubstitutionRuleMappingContext)
+                            SubstitutionRuleMappingContext)
 from loopy.kernel.function_interface import (
         CallableKernel, ScalarCallable)
-from loopy.kernel.instruction import (
-        MultiAssignmentBase, CInstruction, _DataObliviousInstruction)
 from loopy.diagnostic import LoopyError
 from loopy.library.reduction import ReductionOpFunction
 
 from loopy.kernel import LoopKernel
 from loopy.tools import update_persistent_hash
 from pymbolic.primitives import Call
-from functools import reduce
 from pyrsistent import pmap, PMap
 
 __doc__ = """
@@ -60,7 +56,6 @@ def _is_a_reduction_op(expr):
     if isinstance(expr, ResolvedFunction):
         return _is_a_reduction_op(expr.function)
 
-    from loopy.library.reduction import ReductionOpFunction
     return isinstance(expr, ReductionOpFunction)
 
 
@@ -373,41 +368,7 @@ class Program(TranslationUnit):
 # }}}
 
 
-# {{{ next_indexed_function_id
-
-def next_indexed_function_id(function_id):
-    """
-    Returns an instance of :class:`str` with the next indexed-name in the
-    sequence for the name of *function_id*.
-
-    *Example:* ``'sin_0'`` will return ``'sin_1'``.
-
-    :arg function_id: Either an instance of :class:`str`.
-    """
-
-    # {{{ sanity checks
-
-    assert isinstance(function_id, str)
-
-    # }}}
-
-    func_name = re.compile(r"^(?P<alpha>\S+?)_(?P<num>\d+?)$")
-
-    match = func_name.match(function_id)
-
-    if match is None:
-        if function_id[-1] == "_":
-            return f"{function_id}0"
-        else:
-            return f"{function_id}_0"
-
-    return "{alpha}_{num}".format(alpha=match.group("alpha"),
-            num=int(match.group("num"))+1)
-
-# }}}
-
-
-# {{{ rename_resolved_functions_in_a_single_kernel
+# {{{ rename resolved functions
 
 class ResolvedFunctionRenamer(RuleAwareIdentityMapper):
     """
@@ -445,69 +406,39 @@ def rename_resolved_functions_in_a_single_kernel(kernel,
 # }}}
 
 
-# {{{ CallablesIDCollector
-
-class CallablesIDCollector(CombineMapper):
+def get_reachable_resolved_callable_ids(callables, entrypoints):
     """
-    Mapper to collect function identifiers of all resolved callables in an
-    expression.
+    Returns a :class:`frozenset` of callables ids that are resolved and
+    reachable from *entrypoints*.
     """
-    def combine(self, values):
-        import operator
-        return reduce(operator.or_, values, frozenset())
-
-    def map_resolved_function(self, expr):
-        return frozenset([expr.name])
-
-    def map_constant(self, expr):
-        return frozenset()
-
-    def map_kernel(self, kernel):
-        callables_in_insn = frozenset()
-
-        for insn in kernel.instructions:
-            if isinstance(insn, MultiAssignmentBase):
-                callables_in_insn = callables_in_insn | (
-                        self(insn.expression))
-            elif isinstance(insn, (CInstruction, _DataObliviousInstruction)):
-                pass
-            else:
-                raise NotImplementedError(type(insn).__name__)
-
-        for rule in kernel.substitutions.values():
-            callables_in_insn = callables_in_insn | (
-                    self(rule.expression))
-
-        return callables_in_insn
-
-    map_variable = map_constant
-    map_function_symbol = map_constant
-    map_tagged_variable = map_constant
-    map_type_cast = map_constant
-
-
-def _get_callable_ids_for_knl(knl, callables):
-    clbl_id_collector = CallablesIDCollector()
-
-    return frozenset().union(*(
-        _get_callable_ids_for_knl(callables[clbl].subkernel, callables) |
-        frozenset([clbl]) if isinstance(callables[clbl], CallableKernel) else
-        frozenset([clbl])
-        for clbl in clbl_id_collector.map_kernel(knl)))
-
-
-def _get_callable_ids(callables, entrypoints):
-    return frozenset().union(*(
-        _get_callable_ids_for_knl(callables[e].subkernel, callables)
-        for e in entrypoints))
-
-# }}}
+    return frozenset().union(*(callables[e].get_called_callables(callables)
+                               for e in entrypoints))
 
 
 # {{{ CallablesInferenceContext
 
+def get_all_subst_names(callables):
+    """
+    Returns a :class:`set` of all substitution rule names in the callable
+    kernels of *callables*.
+
+    :arg callables: A mapping from function identifiers to
+        :class:`~loopy.kernel.function_interface.InKernelCallable`.
+    """
+    return set().union(*(set(clbl.subkernel.substitutions.keys())
+                         for clbl in callables.values()
+                         if isinstance(clbl, CallableKernel)))
+
+
+def make_callable_name_generator(callables):
+    from pytools import UniqueNameGenerator
+    all_substs = get_all_subst_names(callables)
+    return UniqueNameGenerator(set(callables.keys()) | all_substs)
+
+
 def make_clbl_inf_ctx(callables, entrypoints):
-    return CallablesInferenceContext(callables)
+    name_gen = make_callable_name_generator(callables)
+    return CallablesInferenceContext(callables, name_gen)
 
 
 class CallablesInferenceContext(ImmutableRecord):
@@ -536,12 +467,13 @@ class CallablesInferenceContext(ImmutableRecord):
     .. automethod:: __getitem__
     """
     def __init__(self, callables,
+                 clbl_name_gen,
                  renames=collections.defaultdict(frozenset),
                  new_entrypoints=frozenset()):
         assert isinstance(callables, collections.abc.Mapping)
-        callables = dict(callables)
 
-        super().__init__(callables=callables,
+        super().__init__(callables=dict(callables),
+                         clbl_name_gen=clbl_name_gen,
                          renames=renames,
                          new_entrypoints=new_entrypoints)
 
@@ -605,14 +537,8 @@ class CallablesInferenceContext(ImmutableRecord):
 
         # }}}
 
-        # {{{ must allocate a new clbl in the namespace => find a unique id for it
-
-        unique_function_id = old_function_id
-
-        while unique_function_id in self.callables:
-            unique_function_id = next_indexed_function_id(unique_function_id)
-
-        # }}}
+        # must allocate a new clbl in the namespace => find a unique id for it
+        unique_function_id = self.clbl_name_gen(old_function_id)
 
         updated_callables = self.callables.copy()
         updated_callables[unique_function_id] = new_clbl
@@ -643,7 +569,8 @@ class CallablesInferenceContext(ImmutableRecord):
         # {{{ get all the callables reachable from the new entrypoints.
 
         # get the names of all callables reachable from the new entrypoints
-        new_callable_ids = _get_callable_ids(self.callables, self.new_entrypoints)
+        new_callable_ids = get_reachable_resolved_callable_ids(self.callables,
+                                                               self.new_entrypoints)
 
         # get the history of function ids from the performed renames:
         history = {}
@@ -665,12 +592,7 @@ class CallablesInferenceContext(ImmutableRecord):
         new_callables = {}
 
         for c in callees_with_old_entrypoint_names:
-            unique_func_id = c
-
-            while unique_func_id in self.callables:
-                unique_func_id = next_indexed_function_id(unique_func_id)
-
-            todo_renames[c] = unique_func_id
+            todo_renames[c] = self.clbl_name_gen(c)
 
         for e in self.new_entrypoints:
             # note renames to "rollback" the renaming of entrypoints
@@ -765,7 +687,17 @@ def for_each_kernel(transform):
     return wraps(transform)(_collective_transform)
 
 
-def update_table(callables_table, clbl_id, clbl):
+def add_callable_to_table(callables_table, clbl_id, clbl):
+    """
+    Returns a tuple ``new_clbl_id, new_callables_table`` where
+    *new_callables_table* is a copy of *callables_table* with *clbl* in its
+    namespace. *clbl* is referred to in *new_callables_table*'s namespace by
+    *new_clbl_id*.
+
+    :arg clbl_id: An instance of :class:`str` or
+        :class:`~loopy.library.reduction.ReductionOpFunction` based on which
+        the unique identifier, *new_clbl_id* , is to be chosen.
+    """
     from loopy.kernel.function_interface import InKernelCallable
     assert isinstance(clbl, InKernelCallable)
 
@@ -773,12 +705,17 @@ def update_table(callables_table, clbl_id, clbl):
         if c == clbl:
             return i, callables_table
 
-    while clbl_id in callables_table:
-        clbl_id = next_indexed_function_id(clbl_id)
+    if isinstance(clbl_id, ReductionOpFunction):
+        new_clbl_id = clbl_id.copy()
+    else:
+        assert isinstance(clbl_id, str)
+        ung = make_callable_name_generator(callables_table)
+        new_clbl_id = ung(clbl_id)
 
-    callables_table[clbl_id] = clbl
+    new_callables_table = callables_table.copy()
+    new_callables_table[new_clbl_id] = clbl.with_name(new_clbl_id)
 
-    return clbl_id, callables_table
+    return new_clbl_id, new_callables_table
 
 # }}}
 
