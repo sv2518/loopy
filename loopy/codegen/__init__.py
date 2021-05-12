@@ -478,6 +478,9 @@ def generate_code_for_a_single_kernel(kernel, callables_table, target,
         raise LoopyError("cannot generate code for a kernel that has not been "
                 "scheduled")
 
+    from loopy.check import pre_codegen_checks
+    pre_codegen_checks(kernel, callables_table)
+
     codegen_plog = ProcessLogger(logger, f"{kernel.name}: generate code")
 
     # {{{ examine arg list
@@ -605,11 +608,11 @@ def diverge_callee_entrypoints(program):
     If a :class:`loopy.kernel.function_interface.CallableKernel` is both an
     entrypoint and a callee, then rename the callee.
     """
-    from loopy.translation_unit import (get_reachable_resolved_callable_ids,
+    from loopy.translation_unit import (_get_callable_ids,
                                         rename_resolved_functions_in_a_single_kernel)
     from pytools import UniqueNameGenerator
-    callable_ids = get_reachable_resolved_callable_ids(program.callables_table,
-                                                       program.entrypoints)
+    callable_ids = _get_callable_ids(program.callables_table,
+                                     program.entrypoints)
 
     new_callables = {}
     todo_renames = {}
@@ -760,9 +763,6 @@ def generate_code_v2(program):
     # have different function signatures. To generate correct code, each
     # callable should be exclusively an entrypoint or a non-entrypoint kernel.
     program = diverge_callee_entrypoints(program)
-
-    from loopy.check import pre_codegen_checks
-    pre_codegen_checks(program)
 
     host_programs = {}
     device_programs = []
