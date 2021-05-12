@@ -33,7 +33,7 @@ from loopy.kernel.data import (
         MultiAssignmentBase, TemporaryVariable, AddressSpace)
 from loopy.diagnostic import warn_with_kernel, LoopyError
 from loopy.symbolic import CoefficientCollector
-from pytools import Record, memoize_method
+from pytools import ImmutableRecord, memoize_method
 
 
 __doc__ = """
