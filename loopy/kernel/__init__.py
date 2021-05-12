@@ -1078,30 +1078,41 @@ class LoopKernel(ImmutableRecordWithoutPickling, Taggable):
         global_sizes = {}
         local_sizes = {}
 
+        from loopy.kernel.data import ValueArg
         from loopy.kernel.instruction import CallInstruction
+        from loopy.kernel.function_interface import (CallableKernel,
+                get_kw_pos_association)
+        from loopy.isl_helpers import subst_into_pwaff
         from loopy.symbolic import ResolvedFunction
 
         for insn in self.instructions:
-            # TODO: This might be unsafe as call-sites must be resolved to get
-            # any hardware axes size constraints they might impose. However,
-            # transforms like 'precompute' use this method and callables might
-            # not be resolved by then.
-            if (isinstance(insn, CallInstruction)
-                    and isinstance(insn.expression.function, ResolvedFunction)):
-
+            if isinstance(insn, CallInstruction) and isinstance(
+                    insn.expression.function, ResolvedFunction):
                 clbl = callables_table[insn.expression.function.name]
-                gsize, lsize = clbl.get_hw_axes_sizes(insn.arg_id_to_val(),
-                                                      self.assumptions.space,
-                                                      callables_table)
+                if isinstance(clbl, CallableKernel):
+                    _, pos_to_kw = get_kw_pos_association(clbl.subkernel)
+                    subst_dict = {
+                            pos_to_kw[i]: param
+                            for i, param in enumerate(insn.expression.parameters)
+                            if isinstance(clbl.subkernel.arg_dict[pos_to_kw[i]],
+                                          ValueArg)}
 
-                for tgt_dict, tgt_size in [(global_sizes, gsize),
-                                            (local_sizes, lsize)]:
+                    gsize, lsize = (
+                            clbl.subkernel.get_grid_sizes_for_insn_ids_as_dicts(
+                                frozenset(insn.id
+                                          for insn in clbl.subkernel.instructions),
+                                callables_table, ignore_auto))
 
-                    for iaxis, size in tgt_size.items():
-                        if iaxis in tgt_dict:
-                            tgt_dict[iaxis] = tgt_dict[iaxis].max(size)
-                        else:
-                            tgt_dict[iaxis] = size
+                    for tgt_dict, tgt_size in [(global_sizes, gsize),
+                                                (local_sizes, lsize)]:
+
+                        for iaxis, size in tgt_size.items():
+                            size = subst_into_pwaff(self.assumptions.space,
+                                    size, subst_dict)
+                            if iaxis in tgt_dict:
+                                tgt_dict[iaxis] = tgt_dict[iaxis].max(size)
+                            else:
+                                tgt_dict[iaxis] = size
 
         # }}}
 
@@ -1146,19 +1157,6 @@ class LoopKernel(ImmutableRecordWithoutPickling, Taggable):
 
             tgt_dict[tag.axis] = size
 
-        # {{{ override local_sizes with self.local_sizes
-
-        for i_lsize, lsize in self.local_sizes.items():
-            if i_lsize <= max(local_sizes.keys()):
-                local_sizes[i_lsize] = lsize
-            else:
-                from warnings import warn
-                warn(f"Forced local sizes '{i_lsize}: {lsize}' is unused"
-                     f" because kernel '{self.name}' uses {max(local_sizes.keys())}"
-                     " local hardware axes.")
-
-        # }}}
-
         return global_sizes, local_sizes
 
     @memoize_method
@@ -1174,14 +1172,10 @@ class LoopKernel(ImmutableRecordWithoutPickling, Taggable):
         """
 
         if self.overridden_get_grid_sizes_for_insn_ids:
-            gsize, lsize = self.overridden_get_grid_sizes_for_insn_ids(
-                insn_ids,
-                callables_table=callables_table,
-                ignore_auto=ignore_auto)
-            if return_dict:
-                return dict(enumerate(gsize)), dict(enumerate(lsize))
-            else:
-                return gsize, lsize
+            return self.overridden_get_grid_sizes_for_insn_ids(
+                    insn_ids,
+                    callables_table=callables_table,
+                    ignore_auto=ignore_auto)
 
         global_sizes, local_sizes = self.get_grid_sizes_for_insn_ids_as_dicts(
                 insn_ids, callables_table, ignore_auto=ignore_auto)
@@ -1189,15 +1183,21 @@ class LoopKernel(ImmutableRecordWithoutPickling, Taggable):
         if return_dict:
             return global_sizes, local_sizes
 
-        def to_dim_tuple(size_dict, which):
+        def to_dim_tuple(size_dict, which, forced_sizes={}):
+            forced_sizes = forced_sizes.copy()
+
             size_list = []
             sorted_axes = sorted(size_dict.keys())
 
-            while sorted_axes:
+            while sorted_axes or forced_sizes:
                 if sorted_axes:
                     cur_axis = sorted_axes.pop(0)
                 else:
                     cur_axis = None
+
+                if len(size_list) in forced_sizes:
+                    size_list.append(forced_sizes.pop(len(size_list)))
+                    continue
 
                 assert cur_axis is not None
 
@@ -1210,7 +1210,7 @@ class LoopKernel(ImmutableRecordWithoutPickling, Taggable):
             return tuple(size_list)
 
         return (to_dim_tuple(global_sizes, "global"),
-                to_dim_tuple(local_sizes, "local"))
+                to_dim_tuple(local_sizes, "local", forced_sizes=self.local_sizes))
 
     @memoize_method
     def get_grid_sizes_for_insn_ids_as_exprs(self, insn_ids,
@@ -1250,8 +1250,7 @@ class LoopKernel(ImmutableRecordWithoutPickling, Taggable):
         """
         return self.get_grid_sizes_for_insn_ids(
                 frozenset(insn.id for insn in self.instructions),
-                callables_table, ignore_auto=ignore_auto,
-                return_dict=return_dict)
+                callables_table, ignore_auto=ignore_auto)
 
     def get_grid_size_upper_bounds_as_exprs(self, callables_table,
             ignore_auto=False, return_dict=False):
