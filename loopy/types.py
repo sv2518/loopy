@@ -50,8 +50,8 @@ class LoopyType:
         return None
 
     def with_target(self, target):
-        warn("LoopyType.with_target is deprecated and will go away in 2022.",
-                DeprecationWarning, stacklevel=2)
+        # warn("LoopyType.with_target is deprecated and will go away in 2022.",
+        #         DeprecationWarning, stacklevel=2)
 
         return self
 

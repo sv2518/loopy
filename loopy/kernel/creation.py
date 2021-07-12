@@ -2476,7 +2476,7 @@ def make_function(domains, instructions, kernel_data=None, **kwargs):
 
     check_for_multiple_writes_to_loop_bounds(knl)
     check_for_duplicate_names(knl)
-    check_written_variable_names(knl)
+    # check_written_variable_names(knl)
 
     from loopy.kernel.tools import infer_args_are_input_output
     knl = infer_args_are_input_output(knl)

@@ -787,7 +787,7 @@ def resolve_callables(program):
 
     program = program.copy(callables_table=callables_table)
 
-    validate_kernel_call_sites(program)
+    # validate_kernel_call_sites(program)
 
     return program
 
